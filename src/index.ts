@@ -53,6 +53,23 @@ export function apply(ctx: Context, config: Config) {
     }
   }
 
+  // 调用 OneBot 接口的统一入口（NapCat / LLOneBot / SnowLuma 等 OneBot v11 实现均适用）：
+  // 优先使用 adapter-onebot 的 internal._get(action, params)，action 会原样转发给协议端；
+  // 旧版适配器退回 _request 并手动检查 retcode 信封（retcode === 0 才算成功）。
+  async function callOneBotAction(bot: any, action: string, params: Record<string, any>): Promise<any> {
+    const internal: any = bot?.internal
+    if (typeof internal?._get === 'function') return await internal._get(action, params)
+    if (typeof internal?._request === 'function') {
+      const response = await internal._request(action, params)
+      if (response && typeof response === 'object' && 'retcode' in response) {
+        if (response.retcode === 0) return response.data
+        throw new Error(`OneBot ${action} failed: retcode=${response.retcode} ${response.message || response.wording || ''}`.trim())
+      }
+      return response
+    }
+    throw new Error('当前 adapter-onebot 版本不支持通用接口调用入口（internal._get / _request）')
+  }
+
   // 发送公告
   async function sendGroupNotice(event: any) {
     const formatTime = (value: unknown) => {
@@ -82,12 +99,14 @@ export function apply(ctx: Context, config: Config) {
     }
 
     try {
-      const res = await axios.post('http://localhost:5700/_send_group_notice', body)
-      if (res.data?.status === 'ok') {
-        logger.success(`✅ 已发送群公告：${event.title}`)
-      } else {
-        logger.warn('❌ 群公告失败：', res.data)
+      const bot = ctx.bots.find((item: any) => item.platform === 'onebot' && item.isActive)
+        || ctx.bots.find((item: any) => item.platform === 'onebot')
+      if (!bot) {
+        logger.warn('❌ 未找到可用的 OneBot 机器人，跳过公告发送')
+        return
       }
+      await callOneBotAction(bot, '_send_group_notice', body)
+      logger.success(`✅ 已发送群公告：${event.title}`)
     } catch (err: any) {
       logger.error('❌ 公告发送异常：', err.message)
     }
